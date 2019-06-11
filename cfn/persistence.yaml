@@ -1,0 +1,291 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+Description: >
+  This template builds the persistence tier for images and classifications.
+
+Parameters:
+  ProjectTag:
+    Type: String
+  ImgBucketNm:
+    Type: String
+    Default: "chip-wafer-new-images"
+    Description: >
+      Name for the S3 bucket used to store raw input images.
+    MinLength: 3
+    MaxLength: 64
+    AllowedPattern: '^([a-z]|(\d(?!\d{0,2}\.\d{1,3}\.\d{1,3}\.\d{1,3})))([a-z\d]|(\.(?!(\.|-)))|(-(?!\.))){1,61}[a-z\d\.]$'
+    ConstraintDescription: >
+      Must begin with a letter and only alphanumeric characters or hyphens.
+      Cannot end in a hyphen or period.'
+  AllowedCidrIngress:
+    Type: String
+
+Resources:
+  TblClassifications:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      AttributeDefinitions:
+        - 
+          AttributeName: "imgid"
+          AttributeType: "S"
+        - 
+          AttributeName: "timestamp"
+          AttributeType: "N"
+        - 
+          AttributeName: "fab"
+          AttributeType: "S"
+      BillingMode: "PAY_PER_REQUEST"
+      KeySchema:
+        - 
+          AttributeName: "imgid"
+          KeyType: "HASH"
+        - 
+          AttributeName: "timestamp"
+          KeyType: "RANGE"
+      SSESpecification:
+        SSEEnabled: True
+      GlobalSecondaryIndexes:
+        - IndexName: GsiByFab
+          KeySchema: 
+            - 
+              AttributeName: "fab"
+              KeyType: "HASH"
+            - 
+              AttributeName: "timestamp"
+              KeyType: "RANGE"
+          Projection: 
+            ProjectionType: ALL
+      Tags: 
+        -
+          Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-ClassificationTable"]]
+
+  TblOverrides:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      AttributeDefinitions:
+        - 
+          AttributeName: "imgid"
+          AttributeType: "S"
+        - 
+          AttributeName: "timestamp"
+          AttributeType: "N"
+      BillingMode: "PAY_PER_REQUEST"
+      KeySchema:
+        - 
+          AttributeName: "imgid"
+          KeyType: "HASH"
+        - 
+          AttributeName: "timestamp"
+          KeyType: "RANGE"
+      SSESpecification:
+        SSEEnabled: True
+      Tags: 
+        -
+          Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-ClassificationOverrideTable"]]
+  TblFabsCameras:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      AttributeDefinitions:
+        - 
+          AttributeName: "fab"
+          AttributeType: "S"
+        - 
+          AttributeName: "camera"
+          AttributeType: "S"
+      BillingMode: "PAY_PER_REQUEST"
+      KeySchema:
+        - 
+          AttributeName: "fab"
+          KeyType: "HASH"
+        - 
+          AttributeName: "camera"
+          KeyType: "RANGE"
+      SSESpecification:
+        SSEEnabled: True
+      Tags: 
+        -
+          Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-Fabs"]]
+
+  ImgBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ImgBucketNm
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256     
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-ImgBucket"]]
+      VersioningConfiguration:
+        Status: Enabled
+  BucketPolicyApp:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref ImgBucket 
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - "s3:GetObject"
+            Effect: Allow
+            Resource: !Join ["", ["arn:aws:s3:::", !Ref ImgBucket, "/*"]]
+            Principal:
+              AWS:
+                - "*"
+            Condition: 
+              IpAddress: 
+                aws:SourceIp: !Ref AllowedCidrIngress
+
+  CatalogFnRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+                - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        -
+          PolicyName: lambdas3
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Join ["", ["arn:aws:s3:::", !Ref ImgBucket]]
+              -
+                Effect: Allow
+                Action: s3:List*
+                Resource: !Join ["", ["arn:aws:s3:::", !Ref ImgBucket, "/*"]]
+              -
+                Effect: Allow
+                Action: dynamodb:*
+                Resource: !GetAtt TblFabsCameras.Arn
+
+  CatalogFn:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: "This function gets fab and camera IDs from S3 and stores them in DynamoDB"
+      MemorySize: 1024
+      Runtime: "python3.6"
+      Timeout: 300
+      Role: !GetAtt CatalogFnRole.Arn
+      Handler: "index.handler"
+      Code: 
+        ZipFile: |
+          import boto3
+          import os
+        
+          bucket = os.environ['ImageBucket']
+          tbl = os.environ['CatalogTbl']
+          s3 = boto3.client('s3')
+          ddb = boto3.client('dynamodb')
+
+          def handler(event, context):
+            print('Received event: ' + str(event))
+
+            result = s3.list_objects(Bucket=bucket, Delimiter='/')
+            for o in result.get('CommonPrefixes'):
+              top_level = o.get('Prefix')
+              print("Got top level folder " + top_level)
+              s_result = s3.list_objects(Bucket=bucket, Delimiter='/', Prefix=top_level)
+              for oo in s_result.get('CommonPrefixes'):
+                full_path = oo.get('Prefix')
+                print("Got full folder " + full_path)
+                parts = full_path.split('/')
+                fab = parts[0]
+                camera = parts[1]
+                print("Fab: " + fab + "; Camera: " + camera)
+
+                # Store in DynamoDB
+                rowitem = {
+                        'fab': {
+                            'S': fab
+                        },
+                        'camera': {
+                            'S': camera
+                        }
+                }
+                ddb.put_item(
+                        Item=rowitem,
+                        ReturnConsumedCapacity='TOTAL',
+                        TableName=tbl
+                    )
+
+      Environment:
+        Variables:
+          ImageBucket: !Ref ImgBucket
+          CatalogTbl: !Ref TblFabsCameras
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-CatalogFn"]]
+
+  ScheduleEventRule:
+    Type: "AWS::Events::Rule"
+    Properties: 
+      Description: "Triggers catalog function every hour"
+      ScheduleExpression: "rate(1 hour)" 
+      State: "ENABLED"
+      Targets:
+        - 
+          Arn: 
+            Fn::GetAtt: 
+              - "CatalogFn"
+              - "Arn"
+          Id: "CatalogTargetFn"
+
+  SchedulePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties: 
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt CatalogFn.Arn
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt ScheduleEventRule.Arn
+
+Outputs:
+  TableName:
+    Description: Table name for classifications
+    Value: !Ref TblClassifications
+  TableNameOverrides:
+    Value: !Ref TblOverrides
+  TableNameFabs:
+    Description: Table name for fabs and cameras
+    Value: !Ref TblFabsCameras
+  TableArn:
+    Description: Table ARN
+    Value: !GetAtt TblClassifications.Arn
+  TableArnOverrides:
+    Value: !GetAtt TblOverrides.Arn
+  TableArnFabs:
+    Description: Table ARN
+    Value: !GetAtt TblFabsCameras.Arn
+  ImgBucketName:
+    Description: Image bucket name
+    Value: !Ref ImgBucket
+  GsiClassifications:
+    Value: "GsiByFab"

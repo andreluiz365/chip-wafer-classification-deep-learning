@@ -1,0 +1,949 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-2.0
+
+Description: >
+  This template builds a deployment pipeline for a machine learning model.
+
+Parameters:
+  ExistingJobName:
+    Type: String
+    Description: Set this to the name of an existing SageMaker job in order to skip training.  Otherwise, set to '-n'.
+    Default: "mlimagerepo-2019-03-30-00-13-25-661"
+  EndpointNameProd:
+    Type: String
+    Description: Name for production inference endpoint
+    Default: "ChipWaferInferenceProd"
+  EndpointNameTest:
+    Type: String
+    Description: Name for test inference endpoint
+    Default: "ChipWaferInferenceTest"
+  MetricThreshold:
+    Type: Number
+    Description: Threshold for accuracy
+    Default: 0.8
+  MetricName:
+    Type: String
+    Description: Accuracy metric name
+    Default: "accuracy"
+  RepoName:
+    Type: String
+    Description: Name for the Git repository for ML code
+    Default: "ChipWaferMLRepo"
+  TrainInstanceType:
+    Type: String
+    Description: Instance type to use for SageMaker jobs
+    Default: "ml.p3.2xlarge"
+  HostInstanceType:
+    Type: String
+    Description: Instance type to use for SageMaker inference
+    Default: "ml.m5.2xlarge"
+  TrainEpochs:
+    Type: Number
+    Description: Number of epochs for training
+    Default: 5
+  TrainLR:
+    Type: Number
+    Description: Learning rate
+    Default: 0.01
+  TrainBatchSize:
+    Type: Number
+    Description: Batch size
+    Default: 64
+  RepoNameTrain:
+    Type: String
+    Description: Name for the Git repository for ML training script
+    Default: "ChipWaferTrainRepo"
+  RepoNameTest:
+    Type: String
+    Description: Name for the Git repository for ML testing script
+    Default: "ChipWaferTestRepo"
+  RepoNameDeploy:
+    Type: String
+    Description: Name for the Git repository for ML deploy script
+    Default: "ChipWaferDeployRepo"
+  BuilderName:
+    Type: String
+    Description: Name for the CodeBuild project
+    Default: "ChipWaferMLBuilder"
+  TrainerName:
+    Type: String
+    Description: Name for the CodeBuild project that runs a training job
+    Default: "ChipWaferMLTrainer"
+  TesterName:
+    Type: String
+    Description: Name for the CodeBuild project that tests a model
+    Default: "ChipWaferMLTester"
+  DeployerNameProd:
+    Type: String
+    Description: Name for the CodeBuild project that deploys a model to production
+    Default: "ChipWaferMLDeployerProd"
+  DeployerNameTest:
+    Type: String
+    Description: Name for the CodeBuild project that deploys a model to test
+    Default: "ChipWaferMLDeployerTest"
+  MlCodeBranch:
+    Type: String
+    Description: The branch we monitor for building new classifier images
+    Default: "master"
+  MlDeployBranch:
+    Type: String
+    Description: The branch we monitor for deploy script
+    Default: "master"
+  MlTrainBranch:
+    Type: String
+    Description: The branch we monitor for building new training code
+    Default: "master"
+  MlTestBranch:
+    Type: String
+    Description: The branch we monitor for building new testing code
+    Default: "master"
+  DockerRepoName:
+    Type: String
+    Description: The name of the docker repo that will hold the classifier images
+    Default: "mlimagerepo"
+  DockerImageTag:
+    Type: String
+    Description: Tag to apply to the Docker images
+    Default: "latest"
+  ProjectTag:
+    Type: String
+  DataBucketName:
+    Type: String
+    Default: "chip-wafer"
+    Description: >
+      Name for the pre-existing S3 bucket used to store wafer images.
+  ArtifactBucketName:
+    Type: String
+    Default: "chip-wafer-artifacts"
+    Description: >
+      Name for the S3 bucket used to store build artifacts.
+    MinLength: 3
+    MaxLength: 64
+    AllowedPattern: '^([a-z]|(\d(?!\d{0,2}\.\d{1,3}\.\d{1,3}\.\d{1,3})))([a-z\d]|(\.(?!(\.|-)))|(-(?!\.))){1,61}[a-z\d\.]$'
+    ConstraintDescription: >
+      Must begin with a letter and only alphanumeric characters or hyphens.
+      Cannot end in a hyphen or period.'
+
+Resources:
+
+  MlCodeRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties: 
+      RepositoryDescription: This repository contains the ML training and inference code.
+      RepositoryName: !Ref RepoName
+
+  MlTrainRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties: 
+      RepositoryDescription: This repository contains the script used to invoke a SageMaker training job.
+      RepositoryName: !Ref RepoNameTrain
+
+  MlTestRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties: 
+      RepositoryDescription: This repository contains the script used to test a SageMaker model.
+      RepositoryName: !Ref RepoNameTest
+
+  MlDeployRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties: 
+      RepositoryDescription: This repository contains the script used to deploy a SageMaker model.
+      RepositoryName: !Ref RepoNameDeploy
+
+  MlBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref BuilderName
+      Description: Builds Docker images for classifier
+      ServiceRole: !GetAtt BuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/docker:18.09.0
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Type: PLAINTEXT
+            Value: !Ref AWS::Region
+          - Name: IMAGE_REPO_NAME
+            Type: PLAINTEXT
+            Value: !Ref DockerRepoName
+          - Name: IMAGE_TAG
+            Type: PLAINTEXT
+            Value: !Ref DockerImageTag
+          - Name: AWS_ACCOUNT_ID
+            Type: PLAINTEXT
+            Value: !Ref AWS::AccountId
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-Builder"]]
+
+  MlTrainProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref TrainerName
+      Description: Invokes SageMaker training job
+      ServiceRole: !GetAtt TrainServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/python:3.7.1
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Type: PLAINTEXT
+            Value: !Ref AWS::Region
+          - Name: INSTANCE_TYPE
+            Type: PLAINTEXT
+            Value: !Ref TrainInstanceType
+          - Name: IMAGE_REPO_NAME
+            Type: PLAINTEXT
+            Value: !Ref DockerRepoName
+          - Name: IMAGE_TAG
+            Type: PLAINTEXT
+            Value: !Ref DockerImageTag
+          - Name: AWS_ACCOUNT_ID
+            Type: PLAINTEXT
+            Value: !Ref AWS::AccountId
+          - Name: SAGEMAKER_ROLE_ARN
+            Type: PLAINTEXT
+            Value: !GetAtt TrainServiceRoleSM.Arn
+          - Name: EPOCHS
+            Type: PLAINTEXT
+            Value: !Ref TrainEpochs
+          - Name: LR
+            Type: PLAINTEXT
+            Value: !Ref TrainLR
+          - Name: BATCH_SIZE
+            Type: PLAINTEXT
+            Value: !Ref TrainBatchSize
+          - Name: INPUT_DATA
+            Type: PLAINTEXT
+            Value: !Join ["", ["s3://", !Ref DataBucketName, "/data"]]
+          - Name: NOOP
+            Type: PLAINTEXT
+            Value: !Ref ExistingJobName
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 90
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-Trainer"]]
+
+  MlTestProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref TesterName
+      Description: Verifies new model
+      ServiceRole: !GetAtt TestServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/python:3.7.1
+        EnvironmentVariables:
+          - Name: METRIC_NAME
+            Type: PLAINTEXT
+            Value: !Ref MetricName
+          - Name: METRIC_THRESHOLD
+            Type: PLAINTEXT
+            Value: !Ref MetricThreshold
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-Tester"]]
+
+  MlDeployProjectProd:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref DeployerNameProd
+      Description: Deploys new model to production
+      ServiceRole: !GetAtt DeployServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/python:3.7.1
+        EnvironmentVariables:
+          - Name: ENDPOINT_NAME
+            Type: PLAINTEXT
+            Value: !Ref EndpointNameProd
+          - Name: INSTANCE_TYPE
+            Type: PLAINTEXT
+            Value: !Ref HostInstanceType
+          - Name: IMAGE_NAME
+            Type: PLAINTEXT
+            Value: !Join ["", [!Ref 'AWS::AccountId', '.dkr.ecr.', !Ref 'AWS::Region', '.amazonaws.com/', !Ref DockerRepoName, ':', !Ref DockerImageTag]]
+          - Name: ROLE_ARN
+            Type: PLAINTEXT
+            Value: !GetAtt TrainServiceRoleSM.Arn
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-Deploy-Prod"]]
+  MlDeployProjectTest:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref DeployerNameTest
+      Description: Deploys new model to test
+      ServiceRole: !GetAtt DeployServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/python:3.7.1
+        EnvironmentVariables:
+          - Name: ENDPOINT_NAME
+            Type: PLAINTEXT
+            Value: !Ref EndpointNameTest
+          - Name: INSTANCE_TYPE
+            Type: PLAINTEXT
+            Value: !Ref HostInstanceType
+          - Name: IMAGE_NAME
+            Type: PLAINTEXT
+            Value: !Join ["", [!Ref 'AWS::AccountId', '.dkr.ecr.', !Ref 'AWS::Region', '.amazonaws.com/', !Ref DockerRepoName, ':', !Ref DockerImageTag]]
+          - Name: ROLE_ARN
+            Type: PLAINTEXT
+            Value: !GetAtt TrainServiceRoleSM.Arn
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-Deploy-Test"]]
+
+  MlPipeline: 
+    Type: AWS::CodePipeline::Pipeline
+    Properties: 
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages: 
+        - 
+          Name: Source
+          Actions: 
+            - 
+              Name: CodeChanges
+              ActionTypeId: 
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts: 
+                - 
+                  Name: ClassifierCode
+              Configuration: 
+                BranchName: !Ref MlCodeBranch
+                RepositoryName: !GetAtt MlCodeRepo.Name
+                PollForSourceChanges: False
+              RunOrder: 1
+            - 
+              Name: TrainScriptChanges
+              ActionTypeId: 
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts: 
+                - 
+                  Name: TrainerCode
+              Configuration: 
+                BranchName: !Ref MlTrainBranch
+                RepositoryName: !GetAtt MlTrainRepo.Name
+                PollForSourceChanges: False
+              RunOrder: 2
+            - 
+              Name: TestScriptChanges
+              ActionTypeId: 
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts: 
+                - 
+                  Name: TesterCode
+              Configuration: 
+                BranchName: !Ref MlTestBranch
+                RepositoryName: !GetAtt MlTestRepo.Name
+                PollForSourceChanges: False
+              RunOrder: 3
+            - 
+              Name: DeployScriptChanges
+              ActionTypeId: 
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts: 
+                - 
+                  Name: DeployerCode
+              Configuration: 
+                BranchName: !Ref MlDeployBranch
+                RepositoryName: !GetAtt MlDeployRepo.Name
+                PollForSourceChanges: False
+              RunOrder: 4
+        - 
+          Name: Build
+          Actions: 
+            - 
+              Name: BuildImage
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              InputArtifacts:
+                - 
+                  Name: ClassifierCode
+              OutputArtifacts: 
+                - 
+                  Name: ClassifierImages
+              Configuration: 
+                ProjectName: !Ref BuilderName
+              RunOrder: 1
+            - 
+              Name: TrainModel
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              InputArtifacts:
+                - 
+                  Name: TrainerCode
+              OutputArtifacts: 
+                - 
+                  Name: TrainerArtifacts
+              Configuration: 
+                ProjectName: !Ref TrainerName
+              RunOrder: 2
+        - 
+          Name: Test
+          Actions: 
+            - 
+              Name: TestModel
+              ActionTypeId: 
+                Category: Test
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              InputArtifacts:
+                - 
+                  Name: TrainerArtifacts
+                - 
+                  Name: TesterCode
+              OutputArtifacts: 
+                - 
+                  Name: ModelTestArfifacts
+              Configuration: 
+                ProjectName: !Ref TesterName
+                PrimarySource: TesterCode
+              RunOrder: 1
+        - 
+          Name: DeployToTest
+          Actions: 
+            - 
+              Name: DeployModelTest
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              InputArtifacts:
+                - 
+                  Name: TrainerArtifacts
+                - 
+                  Name: DeployerCode
+              OutputArtifacts: 
+                - 
+                  Name: DeployerArtifactsTest
+              Configuration: 
+                ProjectName: !Ref DeployerNameTest
+                PrimarySource: DeployerCode
+              RunOrder: 1
+        - 
+          Name: PromoteToProd
+          Actions: 
+            - 
+              Name: ApproveModel
+              ActionTypeId: 
+                Category: Approval
+                Owner: AWS
+                Version: 1
+                Provider: Manual
+              RunOrder: 1
+            - 
+              Name: DeployModelProd
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              InputArtifacts:
+                - 
+                  Name: TrainerArtifacts
+                - 
+                  Name: DeployerCode
+              OutputArtifacts: 
+                - 
+                  Name: DeployerArtifactsProd
+              Configuration: 
+                ProjectName: !Ref DeployerNameProd
+                PrimarySource: DeployerCode
+              RunOrder: 2
+      ArtifactStore: 
+        Type: S3
+        Location: 
+          Ref: MlArtifactBucketForBuilds
+
+  MlArtifactBucketForBuilds:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ArtifactBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256     
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-ArtifactBucket"]]
+      VersioningConfiguration:
+        Status: Enabled
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName: pipeline-role
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: s3:*
+                Resource: !GetAtt MlArtifactBucketForBuilds.Arn
+              -
+                Effect: Allow
+                Action: s3:*
+                Resource: !Join ["", [!GetAtt MlArtifactBucketForBuilds.Arn, "/*"]]
+              -
+                Effect: Allow
+                Action: codecommit:*
+                Resource: !GetAtt MlCodeRepo.Arn
+              -
+                Effect: Allow
+                Action: codebuild:*
+                Resource: !GetAtt MlBuildProject.Arn
+              -
+                Effect: Allow
+                Action: codecommit:*
+                Resource: !GetAtt MlTrainRepo.Arn
+              -
+                Effect: Allow
+                Action: codebuild:*
+                Resource: !GetAtt MlTrainProject.Arn
+              -
+                Effect: Allow
+                Action: codecommit:*
+                Resource: !GetAtt MlTestRepo.Arn
+              -
+                Effect: Allow
+                Action: codebuild:*
+                Resource: !GetAtt MlTestProject.Arn
+              -
+                Effect: Allow
+                Action: codecommit:*
+                Resource: !GetAtt MlDeployRepo.Arn
+              -
+                Effect: Allow
+                Action: codebuild:*
+                Resource: !GetAtt MlDeployProjectProd.Arn
+              -
+                Effect: Allow
+                Action: codebuild:*
+                Resource: !GetAtt MlDeployProjectTest.Arn
+
+  AmazonCloudWatchEventRoleForBuilds:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName: cwe-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: codepipeline:StartPipelineExecution
+                Resource: !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref MlPipeline ] ]
+
+  AmazonCloudWatchEventRuleForBuilds:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - 'CodeCommit Repository State Change'
+        resources:
+          - !Join [ '', [ 'arn:aws:codecommit:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref RepoName ] ]
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - !Ref MlCodeBranch
+      Targets:
+        -
+          Arn: 
+            !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref MlPipeline ] ]
+          RoleArn: !GetAtt AmazonCloudWatchEventRoleForBuilds.Arn
+          Id: codepipeline-MlPipeline
+
+  AmazonCloudWatchEventRuleForTrainingRepo:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - 'CodeCommit Repository State Change'
+        resources:
+          - !Join [ '', [ 'arn:aws:codecommit:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref RepoNameTrain ] ]
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - !Ref MlTrainBranch
+      Targets:
+        -
+          Arn: 
+            !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref MlPipeline ] ]
+          RoleArn: !GetAtt AmazonCloudWatchEventRoleForBuilds.Arn
+          Id: codepipeline-MlPipeline
+
+  AmazonCloudWatchEventRuleForTestRepo:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - 'CodeCommit Repository State Change'
+        resources:
+          - !Join [ '', [ 'arn:aws:codecommit:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref RepoNameTest ] ]
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - !Ref MlTestBranch
+      Targets:
+        -
+          Arn: 
+            !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref MlPipeline ] ]
+          RoleArn: !GetAtt AmazonCloudWatchEventRoleForBuilds.Arn
+          Id: codepipeline-MlPipeline
+
+  AmazonCloudWatchEventRuleForDeployRepo:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - 'CodeCommit Repository State Change'
+        resources:
+          - !Join [ '', [ 'arn:aws:codecommit:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref RepoNameDeploy ] ]
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - !Ref MlDeployBranch
+      Targets:
+        -
+          Arn: 
+            !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref MlPipeline ] ]
+          RoleArn: !GetAtt AmazonCloudWatchEventRoleForBuilds.Arn
+          Id: codepipeline-MlPipeline
+
+  BuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName: codebuild-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: ecr:*
+                Resource: !GetAtt MlDockerRepo.Arn
+              -
+                Effect: Allow
+                Action: ecr:*
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: logs:CreateLogStream
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: logs:CreateLogGroup 
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: logs:PutLogEvents 
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: s3:*
+                Resource: !Join ["", [!GetAtt MlArtifactBucketForBuilds.Arn, "/*"]]
+
+  TrainServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        -
+          PolicyName: codebuild-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: logs:CreateLogStream
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: logs:CreateLogGroup 
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: logs:PutLogEvents 
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: s3:*
+                Resource: !Join ["", [!GetAtt MlArtifactBucketForBuilds.Arn, "/*"]]
+              -
+                Effect: Allow
+                Action: s3:*
+                Resource: !Join ["", ["arn:aws:s3:::", !Ref DataBucketName, "/*"]]
+
+  TestServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        -
+          PolicyName: codebuild-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: logs:CreateLogStream
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: logs:CreateLogGroup 
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: logs:PutLogEvents 
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: s3:*
+                Resource: !Join ["", [!GetAtt MlArtifactBucketForBuilds.Arn, "/*"]]
+
+  DeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        -
+          PolicyName: codebuild-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: logs:CreateLogStream
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: logs:CreateLogGroup 
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: logs:PutLogEvents 
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: s3:*
+                Resource: !Join ["", [!GetAtt MlArtifactBucketForBuilds.Arn, "/*"]]
+
+  TrainServiceRoleSM:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        -
+          PolicyName: codebuild-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: logs:CreateLogStream
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: logs:CreateLogGroup 
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: logs:PutLogEvents 
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: s3:*
+                Resource: !Join ["", [!GetAtt MlArtifactBucketForBuilds.Arn, "/*"]]
+              -
+                Effect: Allow
+                Action: s3:*
+                Resource: !Join ["", ["arn:aws:s3:::", !Ref DataBucketName, "/*"]]
+
+  MlDockerRepo:
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: !Ref DockerRepoName
+
+Outputs:
+  CloneUrl:
+    Description: Clone URL for Git repo for classifier code
+    Value: !GetAtt MlCodeRepo.CloneUrlSsh
+  TrainUrl:
+    Description: Clone URL for Git repo for training script
+    Value: !GetAtt MlTrainRepo.CloneUrlSsh
+  TestUrl:
+    Description: Clone URL for Git repo for test script
+    Value: !GetAtt MlTestRepo.CloneUrlSsh
+  DeployUrl:
+    Description: Clone URL for Git repo for deploy script
+    Value: !GetAtt MlDeployRepo.CloneUrlSsh
+  EndpointName:
+    Description: Inference endpoint
+    Value: !Ref EndpointNameProd

@@ -1,0 +1,23 @@
+{
+  "name": "frontend",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "aws-amplify": "^1.1.27",
+    "qs": "^6.5.2",
+    "react": "^16.4.1",
+    "react-bootstrap": "^1.0.0-beta.6",
+    "react-dom": "^16.4.1",
+    "react-router-bootstrap": "^0.24.4",
+    "react-router-dom": "^4.3.1",
+    "react-scripts": "1.1.4",
+    "react-datepicker": "2.5.0",
+    "react-toastify": "5.1.0"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test --env=jsdom",
+    "eject": "react-scripts eject"
+  }
+}

@@ -1,0 +1,723 @@
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+Parameters:
+  AppBucket:
+    Type: String
+    Default: "chip-wafer-app"
+  ProjectTag:
+    Type: String
+  AllowedCidrIngress:
+    Type: String
+  CognitoPoolName:
+    Type: String
+    Default: "ChipWaferPortalPool"
+  CognitoIdPoolName:
+    Type: String
+    Default: "ChipWaferPortalIdPool"
+  CognitoClientName:
+    Type: String
+    Default: "ChipWaferPortalClient"
+  CognitoGroupName:
+    Type: String
+    Default: "ChipWaferPortalGroup"
+  ImgBucketName:
+    Type: String
+  TblFabsCameras:
+    Type: String
+  TblFabsCamerasArn:
+    Type: String
+  GsiClassifications:
+    Type: String
+  TblClassifications:
+    Type: String
+  TblClassificationsArn:
+    Type: String
+  TblOverrides:
+    Type: String
+  TblOverridesArn:
+    Type: String
+
+Resources:
+  ReactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref AppBucket
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256     
+      WebsiteConfiguration:
+        ErrorDocument: "index.html"
+        IndexDocument: "index.html"
+  BucketPolicyApp:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref ReactBucket 
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - "s3:GetObject"
+            Effect: Allow
+            Resource: !Join ["", ["arn:aws:s3:::", !Ref ReactBucket, "/*"]]
+            Principal:
+              AWS:
+                - "*"
+            Condition: 
+              IpAddress: 
+                aws:SourceIp: !Ref AllowedCidrIngress
+  CognitoUserPool:
+    Type: "AWS::Cognito::UserPool"
+    Properties:
+      UserPoolName: !Ref CognitoPoolName
+  CognitoUserPoolClient:
+    Type: "AWS::Cognito::UserPoolClient"
+    Properties:
+        ClientName: !Ref CognitoClientName
+        GenerateSecret: false
+        UserPoolId: !Ref CognitoUserPool
+  CognitoIdPool:
+    Type: "AWS::Cognito::IdentityPool"
+    Properties:
+      IdentityPoolName: !Ref CognitoIdPoolName
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        -
+          ClientId: !Ref CognitoUserPoolClient
+          ProviderName: !GetAtt CognitoUserPool.ProviderName
+  # attach roles to the identity pool #
+  IdentityPoolRoleAttach:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref CognitoIdPool
+      Roles:
+        authenticated: !GetAtt IdentityPoolAccessRole.Arn
+        unauthenticated: !GetAtt IdentityPoolNoAccessRole.Arn
+  IdentityPoolAccessRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        -
+          Effect: "Allow"
+          Principal:
+            Federated:
+            - "cognito-identity.amazonaws.com"
+          Action:
+          - "sts:AssumeRoleWithWebIdentity"
+          Condition:
+            StringEquals:
+              cognito-identity.amazonaws.com:aud:
+              - !Ref CognitoIdPool
+            ForAnyValue:StringLike:
+              cognito-identity.amazonaws.com:amr:
+              - "authenticated"
+      Path: "/"
+      Policies:
+      -
+        PolicyName: "CognitoPolicyForAuth"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          -
+            Effect: "Allow"
+            Action: "s3:Get*"
+            Resource:
+            - !Join [ "", [ "arn:aws:s3:::",!Ref ImgBucketName,'/*']]
+          -
+            Effect: "Allow"
+            Action: "s3:List*"
+            Resource:
+            - !Join [ "", [ "arn:aws:s3:::",!Ref ImgBucketName,'/*']]
+          -
+            Effect: "Allow"
+            Action: "s3:Get*"
+            Resource:
+            - !Join [ "", [ "arn:aws:s3:::",!Ref ImgBucketName]]
+          -
+            Effect: "Allow"
+            Action: "s3:List*"
+            Resource:
+            - !Join [ "", [ "arn:aws:s3:::",!Ref ImgBucketName]]
+          -
+            Effect: "Allow"
+            Action:
+              - "cognito-identity:*"
+              - "cognito-sync:*"
+              - "mobileanalytics:PutEvents"
+            Resource:
+              - "*"
+          -
+            Effect: "Allow"
+            Action: "execute-api:Invoke"
+            Resource:
+            - !Join [ "/", [!Join [ ":", [ "arn:aws:execute-api",!Ref 'AWS::Region','*',!Ref ApiHandler]], "*"]]
+  IdentityPoolNoAccessRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        -
+          Effect: "Deny"
+          Principal:
+            Federated:
+            - "cognito-identity.amazonaws.com"
+          Action:
+          - "sts:AssumeRoleWithWebIdentity"
+          Condition:
+            StringEquals:
+              cognito-identity.amazonaws.com:aud:
+              - !Ref CognitoIdPool
+            ForAnyValue:StringLike:
+              cognito-identity.amazonaws.com:amr:
+              - "authenticated"
+      Path: "/"
+      Policies:
+      -
+        PolicyName: "CognitoDenyPolicy"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          -
+            Effect: "Deny"
+            Action: "s3:Get*"
+            Resource:
+            - !Join [ "", [ "arn:aws:s3:::",!Ref ImgBucketName,'/*']]
+          -
+            Effect: "Deny"
+            Action: "s3:List*"
+            Resource:
+            - !Join [ "", [ "arn:aws:s3:::",!Ref ImgBucketName,'/*']]
+          -
+            Effect: "Deny"
+            Action: "s3:Get*"
+            Resource:
+            - !Join [ "", [ "arn:aws:s3:::",!Ref ImgBucketName]]
+          -
+            Effect: "Deny"
+            Action: "s3:List*"
+            Resource:
+            - !Join [ "", [ "arn:aws:s3:::",!Ref ImgBucketName]]
+          -
+            Effect: "Deny"
+            Action:
+              - "cognito-identity:*"
+              - "cognito-sync:*"
+              - "mobileanalytics:PutEvents"
+            Resource:
+              - "*"
+          -
+            Effect: "Deny"
+            Action: "execute-api:Invoke"
+            Resource:
+            - !Join [ "/", [!Join [ ":", [ "arn:aws:execute-api",!Ref 'AWS::Region','*',!Ref ApiHandler]], "*"]]
+  CognitoGroup:
+    Type: "AWS::Cognito::UserPoolGroup"
+    Properties:
+        GroupName: !Ref CognitoGroupName
+        Precedence: 1
+        RoleArn: !GetAtt CUPGroupRole.Arn
+        UserPoolId: !Ref CognitoUserPool
+  CUPGroupRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        -
+          Effect: "Allow"
+          Principal:
+            Federated:
+            - "cognito-identity.amazonaws.com"
+          Action:
+          - "sts:AssumeRoleWithWebIdentity"
+          Condition:
+            StringEquals:
+              cognito-identity.amazonaws.com:aud:
+              - !Ref CognitoIdPool
+            ForAnyValue:StringLike:
+              cognito-identity.amazonaws.com:amr:
+              - "authenticated"
+      Path: "/"
+      Policies:
+      -
+        PolicyName: "CognitoPolicyDynamoS3"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          -
+            Effect: "Allow"
+            Action: "s3:Get*"
+            Resource:
+            - !Join [ "", [ "arn:aws:s3:::",!Ref ImgBucketName,'/*']]
+          -
+            Effect: "Allow"
+            Action: "s3:List*"
+            Resource:
+            - !Join [ "", [ "arn:aws:s3:::",!Ref ImgBucketName,'/*']]
+          -
+            Effect: "Allow"
+            Action: "s3:Get*"
+            Resource:
+            - !Join [ "", [ "arn:aws:s3:::",!Ref ImgBucketName]]
+          -
+            Effect: "Allow"
+            Action: "s3:List*"
+            Resource:
+            - !Join [ "", [ "arn:aws:s3:::",!Ref ImgBucketName]]
+          -
+            Effect: "Allow"
+            Action: "execute-api:Invoke"
+            Resource:
+            - !Join [ "/", [!Join [ ":", [ "arn:aws:execute-api",!Ref 'AWS::Region','*',!Ref ApiHandler]], "*"]]
+  ApiHandler:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Ref ProjectTag
+  DeviceResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiHandler.RootResourceId
+      PathPart: "devices"
+      RestApiId: !Ref ApiHandler
+  ImgResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiHandler.RootResourceId
+      PathPart: "images"
+      RestApiId: !Ref ApiHandler
+  TruthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiHandler.RootResourceId
+      PathPart: "groundtruth"
+      RestApiId: !Ref ApiHandler
+  FabGetMethod:
+    DependsOn: LambdaPermissionFabGet
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: AWS_IAM
+      HttpMethod: GET
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_MATCH
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FabGetFn.Arn}/invocations
+      ResourceId: !Ref DeviceResource
+      RestApiId: !Ref ApiHandler
+  FabGetMethodCors:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers : "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods : "'*'"
+            ResponseTemplates:
+              application/json: "{}"
+        RequestTemplates:
+          application/json: "{\"statusCode\": 200}"
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers : "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            method.response.header.Access-Control-Allow-Methods : "'*'"
+            method.response.header.Access-Control-Allow-Origin : "'*'"
+          StatusCode: 200
+      ResourceId: !Ref DeviceResource
+      RestApiId: !Ref ApiHandler
+  ImgGetMethod:
+    DependsOn: LambdaPermissionImgGet
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: AWS_IAM
+      HttpMethod: GET
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_MATCH
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ImgGetFn.Arn}/invocations
+      ResourceId: !Ref ImgResource
+      RestApiId: !Ref ApiHandler
+  ImgGetMethodCors:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers : "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods : "'*'"
+            ResponseTemplates:
+              application/json: "{}"
+        RequestTemplates:
+          application/json: "{\"statusCode\": 200}"
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers : "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            method.response.header.Access-Control-Allow-Methods : "'*'"
+            method.response.header.Access-Control-Allow-Origin : "'*'"
+          StatusCode: 200
+      ResourceId: !Ref ImgResource
+      RestApiId: !Ref ApiHandler
+  TruthPutMethod:
+    DependsOn: LambdaPermissionTruthPut
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: AWS_IAM
+      HttpMethod: POST
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_MATCH
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TruthPutFn.Arn}/invocations
+      ResourceId: !Ref TruthResource
+      RestApiId: !Ref ApiHandler
+  TruthPutMethodCors:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers : "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods : "'*'"
+            ResponseTemplates:
+              application/json: "{}"
+        RequestTemplates:
+          application/json: "{\"statusCode\": 200}"
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers : "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            method.response.header.Access-Control-Allow-Methods : "'*'"
+            method.response.header.Access-Control-Allow-Origin : "'*'"
+          StatusCode: 200
+      ResourceId: !Ref TruthResource
+      RestApiId: !Ref ApiHandler
+  LambdaPermissionFabGet:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt FabGetFn.Arn
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Join ["", ["arn:aws:execute-api:", !Ref 'AWS::Region', ":", !Ref 'AWS::AccountId', ":", !Ref ApiHandler, "/*"]]
+  LambdaPermissionImgGet:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt ImgGetFn.Arn
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Join ["", ["arn:aws:execute-api:", !Ref 'AWS::Region', ":", !Ref 'AWS::AccountId', ":", !Ref ApiHandler, "/*"]]
+  LambdaPermissionTruthPut:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt TruthPutFn.Arn
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Join ["", ["arn:aws:execute-api:", !Ref 'AWS::Region', ":", !Ref 'AWS::AccountId', ":", !Ref ApiHandler, "/*"]]
+  ApiDeployment:
+    DependsOn: FabGetMethod
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref ApiHandler
+      StageName: "test"
+      StageDescription:
+        DataTraceEnabled: true
+        Description: String
+        LoggingLevel: INFO
+        MetricsEnabled: true
+  ApiBackendFnRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+                - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        -
+          PolicyName: lambdas3
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: dynamodb:*
+                Resource: !Ref TblFabsCamerasArn
+              -
+                Effect: Allow
+                Action: dynamodb:*
+                Resource: !Ref TblOverridesArn
+              -
+                Effect: Allow
+                Action: dynamodb:*
+                Resource: !Ref TblClassificationsArn
+              -
+                Effect: Allow
+                Action: dynamodb:Query
+                Resource: !Join ["", [!Ref TblClassificationsArn, "/index/*"]]
+  FabGetFn:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: "This function gets a list of all Fabs from DynamoDB"
+      MemorySize: 1024
+      Runtime: "python3.6"
+      Timeout: 300
+      Role: !GetAtt ApiBackendFnRole.Arn
+      Handler: "index.handler"
+      Code: 
+        ZipFile: |
+          from __future__ import print_function
+          import boto3
+          import os
+          import traceback
+          import json
+          from collections import defaultdict
+
+          tbl = os.environ['CatalogTbl']
+          ddb = boto3.client('dynamodb')
+
+          def respond(err, res=None):
+            return {
+                'statusCode': '400' if err else '200',
+                'body': err.message if err else json.dumps(res),
+                'headers': {
+                    'Content-Type': 'application/json',
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Credentials": 'true'
+                },
+            }
+        
+          def handler(event, context):
+            print("Received event: " + json.dumps(event, indent=2))
+            operation = event['httpMethod']
+
+            if operation != "GET":
+              return respond(ValueError('Unsupported method "{}"'.format(operation)))
+            else:
+              payload = event['queryStringParameters'] if operation == 'GET' else json.loads(event['body'])
+              print("Getting all fabs")
+
+              try:
+                response = ddb.scan( TableName=tbl, Select = 'ALL_ATTRIBUTES')
+                print("SUCCESS: Dynamo scan succeeded")
+                fabs = defaultdict(list)
+                for r in response['Items']:
+                  fab = r['fab']['S']
+                  camera = r['camera']['S']
+                  fabs[fab].append(camera)
+                print("Returning {0} fabs".format(str(len(fabs.items()))))
+                return respond(None, fabs)
+              except Exception as e:
+                trc = traceback.format_exc()
+                print("ERROR: Unexpected error: Could not get fabs: {0} - {1}".format(str(e), trc))
+                return respond(ValueError("ERROR: Unexpected error: Could not get fabs: {0} - {1}".format(str(e), trc)))
+
+      Environment:
+        Variables:
+          CatalogTbl: !Ref TblFabsCameras
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-FabGetFn"]]
+
+  ImgGetFn:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: "This function gets a list of images from DynamoDB"
+      MemorySize: 1024
+      Runtime: "python3.6"
+      Timeout: 300
+      Role: !GetAtt ApiBackendFnRole.Arn
+      Handler: "index.handler"
+      Code: 
+        ZipFile: |
+          from __future__ import print_function
+          import boto3
+          import os
+          import traceback
+          import json
+          from collections import defaultdict
+
+          tbl = os.environ['PredictTbl']
+          gsi = os.environ['PredictGsi']
+          ddb = boto3.client('dynamodb')
+
+          def respond(err, res=None):
+            return {
+                'statusCode': '400' if err else '200',
+                'body': err.message if err else json.dumps(res),
+                'headers': {
+                    'Content-Type': 'application/json',
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Credentials": 'true'
+                },
+            }
+        
+          def handler(event, context):
+            print("Received event: " + json.dumps(event, indent=2))
+            operation = event['httpMethod']
+
+            if operation != "GET":
+              return respond(ValueError('Unsupported method "{}"'.format(operation)))
+            else:
+              payload = event['queryStringParameters'] if operation == 'GET' else json.loads(event['body'])
+              fab = payload['fab']
+              camera = payload['camera']
+              from_date = payload['fromts']
+              to_date = payload['tots']
+              print("Getting images for fab {0}, camera {1}, between {2} and {3}".format(fab, camera, from_date, to_date))
+
+              try:
+                response = ddb.query( TableName=tbl, IndexName = gsi, Select = 'ALL_ATTRIBUTES', 
+                  FilterExpression = "camera = :camname",
+                  KeyConditionExpression = "fab = :fabname AND #ts BETWEEN :fromts AND :tots",
+                  ExpressionAttributeValues = { ":fabname":{"S":fab}, ":fromts":{"N":from_date}, ":tots":{"N":to_date}, ":camname":{"S":camera} },
+                  ExpressionAttributeNames = {'#ts': 'timestamp'}
+                )
+                print("SUCCESS: Dynamo query succeeded")
+                imglist = []
+                for r in response['Items']:
+                  imgid = r['imgid']['S']
+                  probability = r['probability']['N']
+                  prediction = r['prediction']['S']
+                  imglist.append({'imgid': imgid, 'probability': probability, 'prediction': prediction})
+                print("Returning {0} images".format(str(len(imglist))))
+                return respond(None, imglist)
+              except Exception as e:
+                trc = traceback.format_exc()
+                print("ERROR: Unexpected error: Could not get images: {0} - {1}".format(str(e), trc))
+                return respond(ValueError("ERROR: Unexpected error: Could not get images: {0} - {1}".format(str(e), trc)))
+
+      Environment:
+        Variables:
+          PredictTbl: !Ref TblClassifications
+          PredictGsi: !Ref GsiClassifications
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-FabGetFn"]]
+
+  TruthPutFn:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: "This function stores ground truth in DynamoDB"
+      MemorySize: 1024
+      Runtime: "python3.6"
+      Timeout: 300
+      Role: !GetAtt ApiBackendFnRole.Arn
+      Handler: "index.handler"
+      Code: 
+        ZipFile: |
+          from __future__ import print_function
+          import boto3
+          import os
+          import traceback
+          import json
+          import time
+          from collections import defaultdict
+
+          tbl = os.environ['TruthTbl']
+          ddb = boto3.client('dynamodb')
+
+          def respond(err, res=None):
+            return {
+                'statusCode': '400' if err else '200',
+                'body': err.message if err else json.dumps(res),
+                'headers': {
+                    'Content-Type': 'application/json',
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Credentials": 'true'
+                },
+            }
+        
+          def handler(event, context):
+            print("Received event: " + json.dumps(event, indent=2))
+            operation = event['httpMethod']
+
+            if operation != "POST":
+              return respond(ValueError('Unsupported method "{}"'.format(operation)))
+            else:
+              payload = event['queryStringParameters'] if operation == 'GET' else json.loads(event['body'])
+              fab = payload['fab']
+              camera = payload['camera']
+              imgid = payload['imgid']
+              truth = payload['truth']
+              print("Storing ground truth {0} for fab {1}, camera {2}, image {3}".format(truth, fab, camera, imgid))
+
+              try:
+                rowitem = {
+                  'imgid': {
+                    'S': imgid
+                  },
+                  'timestamp': {
+                      'N': str(int(time.time()))
+                  },
+                  'fab': {
+                    'S': fab
+                  },
+                  'camera': {
+                    'S': camera
+                  },
+                  'ground_truth': {
+                    'S': truth
+                  }
+                }
+                response = ddb.put_item( TableName=tbl, 
+                  ReturnConsumedCapacity='TOTAL',
+                  Item=rowitem
+                )
+                print("SUCCESS: Dynamo put succeeded")
+                return respond(None, {'msg': "Feedback saved"})
+              except Exception as e:
+                trc = traceback.format_exc()
+                print("ERROR: Unexpected error: Could not store ground truth: {0} - {1}".format(str(e), trc))
+                return respond(ValueError('Could not store feedback'));
+
+      Environment:
+        Variables:
+          TruthTbl: !Ref TblOverrides
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-TruthPutFn"]]
+Outputs:
+    WebsiteURL:
+      Value: !GetAtt ReactBucket.WebsiteURL
+    UserPoolId:
+      Value: !Ref CognitoUserPool
+    ClientId:
+      Value: !Ref CognitoUserPoolClient
+    IdentityPoolId:
+      Value: !Ref CognitoIdPool
+    GroupName:
+      Value: !Ref CognitoGroupName
+    ApiUrl:
+      Value: !Join [ "", ["https://", !Ref ApiHandler, ".execute-api.", !Ref 'AWS::Region', ".amazonaws.com/test"]]

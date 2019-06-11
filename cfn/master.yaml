@@ -1,0 +1,117 @@
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  This template builds a defect classification system for chip wafer maps.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+        Label:
+          default: "Other Configuration"
+        Parameters:
+          - ProjectTag
+          - TemplateBucketName
+          - TemplateBucketPrefix
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      "REGIONURLSUFFIX" : ""
+    us-west-2:
+      "REGIONURLSUFFIX" : "-us-west-2"
+
+Parameters:
+  SecurityAccessCIDR:
+    Description: CIDR block to limit inbound access for only SSH
+    Type: String
+    Default: '0.0.0.0/0'
+  ProjectTag:
+    Type: String
+    Description: Tag to apply to created resources for visibility
+    Default: ChipWaferAnalysis
+  TemplateBucketName:
+    Type: String
+    Description: >
+      Name for the S3 bucket that contains the nested templates.
+  TemplateBucketPrefix:
+    Type: String
+    Description: >
+      Prefix for the path to the nested templates in the S3 bucket.
+  myKeyPair:
+    Description: Amazon EC2 Key Pair for accessing Greengrass Core instance
+    Type: "AWS::EC2::KeyPair::KeyName"
+    Default: 'sandbox'
+
+Resources:
+  IotStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Join ["", ["https://s3", !FindInMap [RegionMap, !Ref "AWS::Region", REGIONURLSUFFIX], ".amazonaws.com/", !Ref TemplateBucketName, "/", !Ref TemplateBucketPrefix, "/iot.yaml"]]
+      Parameters:
+        EndpointName: !GetAtt PipelineStack.Outputs.EndpointName
+        TblArn: !GetAtt PersistenceStack.Outputs.TableArn
+        TblName: !GetAtt PersistenceStack.Outputs.TableName
+        ProjectTag: !Ref ProjectTag
+        ImgBucketName: !GetAtt PersistenceStack.Outputs.ImgBucketName
+        SecurityAccessCIDR: !Ref SecurityAccessCIDR
+        VPC: !GetAtt NetworkStack.Outputs.VpcId
+        SubnetId: !GetAtt NetworkStack.Outputs.SubnetIdPublicA
+        myKeyPair: !Ref myKeyPair
+  AppStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Join ["", ["https://s3", !FindInMap [RegionMap, !Ref "AWS::Region", REGIONURLSUFFIX], ".amazonaws.com/", !Ref TemplateBucketName, "/", !Ref TemplateBucketPrefix, "/app.yaml"]]
+      Parameters:
+        ProjectTag: !Ref ProjectTag
+        AllowedCidrIngress: !Ref SecurityAccessCIDR
+        ImgBucketName: !GetAtt PersistenceStack.Outputs.ImgBucketName
+        TblFabsCameras: !GetAtt PersistenceStack.Outputs.TableNameFabs
+        TblFabsCamerasArn: !GetAtt PersistenceStack.Outputs.TableArnFabs
+        GsiClassifications: !GetAtt PersistenceStack.Outputs.GsiClassifications
+        TblClassifications: !GetAtt PersistenceStack.Outputs.TableName
+        TblClassificationsArn: !GetAtt PersistenceStack.Outputs.TableArn
+        TblOverrides: !GetAtt PersistenceStack.Outputs.TableNameOverrides
+        TblOverridesArn: !GetAtt PersistenceStack.Outputs.TableArnOverrides
+  PipelineStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Join ["", ["https://s3", !FindInMap [RegionMap, !Ref "AWS::Region", REGIONURLSUFFIX], ".amazonaws.com/", !Ref TemplateBucketName, "/", !Ref TemplateBucketPrefix, "/pipeline.yaml"]]
+      Parameters:
+        ProjectTag: !Ref ProjectTag
+  PersistenceStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Join ["", ["https://s3", !FindInMap [RegionMap, !Ref "AWS::Region", REGIONURLSUFFIX], ".amazonaws.com/", !Ref TemplateBucketName, "/", !Ref TemplateBucketPrefix, "/persistence.yaml"]]
+      Parameters:
+        ProjectTag: !Ref ProjectTag
+        AllowedCidrIngress: !Ref SecurityAccessCIDR
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Join ["", ["https://s3", !FindInMap [RegionMap, !Ref "AWS::Region", REGIONURLSUFFIX], ".amazonaws.com/", !Ref TemplateBucketName, "/", !Ref TemplateBucketPrefix, "/network.yaml"]]
+      Parameters:
+        ProjectTag: !Ref ProjectTag
+
+Outputs:
+  CloneUrl:
+    Description: Clone URL for Git repo
+    Value: !GetAtt PipelineStack.Outputs.CloneUrl
+  CloneUrlForTrainer:
+    Description: Clone URL for Git repo for training script
+    Value: !GetAtt PipelineStack.Outputs.TrainUrl
+  CloneUrlForTest:
+    Description: Clone URL for Git repo for test script
+    Value: !GetAtt PipelineStack.Outputs.TestUrl
+  DeployUrl:
+    Description: Clone URL for Git repo for deploy script
+    Value: !GetAtt PipelineStack.Outputs.DeployUrl
+  ClassificationTable:
+    Description: DynamoDB table that holds classification records
+    Value: !GetAtt PersistenceStack.Outputs.TableName
+  GgCoreSim:
+    Description: Host name for core simulator
+    Value: !GetAtt IotStack.Outputs.GgCoreSim
